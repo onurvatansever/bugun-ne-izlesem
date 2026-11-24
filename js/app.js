@@ -4,9 +4,9 @@
   const { utils, storage, api } = global.NeIzlesem;
 
   const LOADING_MESSAGES = {
-    game: "Steam indirimleri ve yüksek puanlı oyunlar yükleniyor...",
+    game: "NEXARDA üzerinden güncel oyunlar ve indirimler yükleniyor...",
     show: "TVMaze üzerinden popüler diziler yükleniyor...",
-    anime: "MyAnimeList en iyi anime havuzu yükleniyor..."
+    anime: "AniList üzerinden popüler animeler yükleniyor..."
   };
 
   const state = {
@@ -129,6 +129,13 @@
 
     // 10$ altı filtresi yalnızca Oyun sekmesinde görünür
     el.filterUnderTen.classList.toggle("hidden", state.category !== "game");
+    const highRatedLabel = el.filterHighRated.querySelector("span:last-child");
+    if (highRatedLabel) {
+      highRatedLabel.textContent =
+        state.category === "game"
+          ? "Öne Çıkanlar & Yüksek İndirim (%25+)"
+          : "Sadece Yüksek Puanlılar (8.0+)";
+    }
     el.filterHighRated.setAttribute("aria-pressed", state.filters.highRated ? "true" : "false");
     el.filterUnderTen.setAttribute("aria-pressed", state.filters.underTen ? "true" : "false");
   }

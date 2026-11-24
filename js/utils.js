@@ -145,18 +145,26 @@
     const opts = filters || {};
 
     if (opts.highRated) {
-      if (typeof item.score !== "number" || !Number.isFinite(item.score)) {
-        return false;
+      if (category === "game") {
+        const hasHighScore = typeof item.score === "number" && Number.isFinite(item.score) && item.score >= 80;
+        const hasBigDiscount = Boolean(item.priceInfo && item.priceInfo.savings >= 25);
+        const isFeatured = Boolean(item.isFeatured);
+        if (!hasHighScore && !hasBigDiscount && !isFeatured) {
+          return false;
+        }
+      } else {
+        if (typeof item.score !== "number" || !Number.isFinite(item.score)) {
+          return false;
+        }
+        if (item.score < 8.0) return false;
       }
-      const threshold = category === "game" ? 80 : 8.0;
-      if (item.score < threshold) return false;
     }
 
     if (category === "game" && opts.underTen) {
       const salePrice = item.priceInfo && typeof item.priceInfo.salePrice === "number"
         ? item.priceInfo.salePrice
         : Infinity;
-      if (!(salePrice < 10)) return false;
+      if (!(salePrice >= 0 && salePrice < 10)) return false;
     }
 
     return true;

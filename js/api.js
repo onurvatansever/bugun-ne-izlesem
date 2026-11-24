@@ -6,101 +6,153 @@
     (typeof require === "function" ? require("./utils.js") : null);
 
   const ENDPOINTS = {
-    game: "https://www.cheapshark.com/api/1.0/deals?storeID=1&pageSize=60",
+    gamePages: [
+      "https://www.nexarda.com/api/v3/search?type=games&q=&currency=USD&page=2",
+      "https://www.nexarda.com/api/v3/search?type=games&q=a&currency=USD&page=1"
+    ],
     show: "https://api.tvmaze.com/shows?page=1",
-    anime: "https://api.jikan.moe/v4/top/anime?limit=25"
+    anime: "https://graphql.anilist.co"
   };
 
-  function normalizeGame(deal) {
-    if (!deal || !deal.dealID || !deal.title) return null;
-
-    const salePrice = Number.parseFloat(deal.salePrice);
-    const normalPrice = Number.parseFloat(deal.normalPrice);
-    const savings = Math.round(Number.parseFloat(deal.savings) || 0);
-    const metacriticRaw = Number.parseInt(deal.metacriticScore, 10);
-    const score = Number.isFinite(metacriticRaw) && metacriticRaw > 0 ? metacriticRaw : null;
-
-    const steamAppID = deal.steamAppID ? String(deal.steamAppID).trim() : "";
-    const thumbUrl = utils.ensureHttps(deal.thumb || "");
-    const highResCover = steamAppID
-      ? "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/" +
-        encodeURIComponent(steamAppID) +
-        "/header.jpg"
-      : thumbUrl;
-
-    const ratingTr = utils.translateSteamRating(deal.steamRatingText);
-    const ratingPercent = Number.parseInt(deal.steamRatingPercent, 10);
-    const reviewCount = Number.parseInt(deal.steamRatingCount, 10);
-
-    const summaryParts = [];
-    if (savings > 0 && Number.isFinite(normalPrice) && Number.isFinite(salePrice)) {
-      summaryParts.push(
-        "Steam'de %" +
-          savings +
-          " indirimle " +
-          utils.formatUsd(normalPrice) +
-          " yerine " +
-          utils.formatUsd(salePrice) +
-          " fiyatıyla öne çıkıyor."
-      );
-    } else if (Number.isFinite(salePrice)) {
-      summaryParts.push("Steam mağazasında " + utils.formatUsd(salePrice) + " fiyatıyla listeleniyor.");
-    }
-
-    if (ratingTr) {
-      let reviewSentence = "Steam kullanıcı değerlendirmesi: " + ratingTr;
-      if (Number.isFinite(ratingPercent) && ratingPercent > 0) {
-        reviewSentence += " (%" + ratingPercent + " olumlu";
-        if (Number.isFinite(reviewCount) && reviewCount > 0) {
-          reviewSentence += ", " + reviewCount.toLocaleString("tr-TR") + " inceleme";
+  const ANILIST_QUERY = `
+    query {
+      Page(page: 1, perPage: 50) {
+        media(type: ANIME, sort: POPULARITY_DESC, isAdult: false) {
+          id
+          idMal
+          title {
+            romaji
+            english
+          }
+          averageScore
+          episodes
+          seasonYear
+          genres
+          description(asHtml: false)
+          coverImage {
+            extraLarge
+            large
+          }
+          siteUrl
         }
-        reviewSentence += ")";
       }
-      summaryParts.push(reviewSentence + ".");
     }
+  `;
 
-    if (score !== null) {
-      summaryParts.push("Metacritic eleştirmen puanı " + score + "/100.");
-    }
+  function normalizeNexardaGame(entry) {
+    if (!entry || !entry.game_info || !entry.game_info.id) return null;
+
+    const info = entry.game_info;
+    if (info.upcoming || info.delisted || info.cancelled) return null;
+
+    const lowestPrice = typeof info.lowest_price === "number" ? info.lowest_price : -1;
+    if (lowestPrice < 0) return null;
+
+    const discount =
+      typeof info.highest_discount === "number" && info.highest_discount > 0
+        ? Math.round(info.highest_discount)
+        : 0;
+
+    const isFeatured = Boolean(info.spotlight);
+    const title = String(info.name || entry.title || "İsimsiz Oyun").trim();
+    const image = utils.ensureHttps(entry.image || "");
+
+    const releaseYear =
+      typeof info.release_date === "number" && info.release_date > 0
+        ? new Date(info.release_date * 1000).getUTCFullYear()
+        : null;
+
+    const platforms = Array.isArray(info.platforms)
+      ? info.platforms
+          .slice(0, 2)
+          .map(function (p) {
+            return p && p.name ? String(p.name).trim() : "";
+          })
+          .filter(Boolean)
+      : [];
 
     const tags = [];
-    if (savings > 0) {
-      tags.push({ type: "discount", label: "-" + savings + "%" });
+    if (discount > 0) {
+      tags.push({ type: "discount", label: "-" + discount + "%" });
     }
-    if (Number.isFinite(salePrice)) {
+
+    if (lowestPrice === 0) {
+      tags.push({ type: "price", salePrice: "Ücretsiz", normalPrice: "" });
+    } else {
+      const approxNormal =
+        discount > 0 && discount < 99
+          ? lowestPrice / (1 - discount / 100)
+          : null;
       tags.push({
         type: "price",
-        salePrice: utils.formatUsd(salePrice),
+        salePrice: utils.formatUsd(lowestPrice),
         normalPrice:
-          Number.isFinite(normalPrice) && normalPrice > salePrice
-            ? utils.formatUsd(normalPrice)
+          approxNormal && approxNormal > lowestPrice + 0.05
+            ? utils.formatUsd(approxNormal)
             : ""
       });
     }
-    if (ratingTr) {
-      tags.push({ type: "tag", label: "Steam: " + ratingTr });
+
+    platforms.forEach(function (plat) {
+      tags.push({ type: "tag", label: plat });
+    });
+
+    if (releaseYear && releaseYear >= 1980 && releaseYear <= 2030) {
+      tags.push({ type: "tag", label: String(releaseYear) });
     }
 
+    let scoreLabel = "Fırsat";
+    let scoreTier = "mid";
+    if (isFeatured) {
+      scoreLabel = "Öne Çıkan";
+      scoreTier = "high";
+    } else if (discount >= 25) {
+      scoreLabel = "%" + discount + " İndirim";
+      scoreTier = "high";
+    } else if (lowestPrice === 0) {
+      scoreLabel = "Ücretsiz";
+      scoreTier = "high";
+    } else if (discount > 0) {
+      scoreLabel = "%" + discount + " İndirim";
+      scoreTier = "mid";
+    } else if (releaseYear) {
+      scoreLabel = String(releaseYear);
+      scoreTier = "na";
+    }
+
+    const cleanedDesc = utils.stripHtml(info.short_desc || "");
+    const fallbackDesc =
+      lowestPrice === 0
+        ? "Şu an ücretsiz olarak oynanabilen popüler oyunlardan biri."
+        : "NEXARDA üzerinde " + utils.formatUsd(lowestPrice) + " başlangıç fiyatıyla listeleniyor.";
+
+    const slug = typeof entry.slug === "string" ? entry.slug.trim() : "";
+    const detailUrl = slug.startsWith("/")
+      ? "https://www.nexarda.com" + slug
+      : utils.sanitizeExternalUrl(slug);
+
     return {
-      uid: "game:" + deal.dealID,
+      uid: "game:" + info.id,
       category: "game",
-      title: String(deal.title).trim(),
-      image: highResCover || utils.PLACEHOLDER_SVG,
-      fallbackImage: thumbUrl || utils.PLACEHOLDER_SVG,
-      score: score,
-      scoreLabel: score !== null ? "Metacritic " + score : "Metacritic Yok",
-      scoreTier: score === null ? "na" : score >= 80 ? "high" : "mid",
+      title: title,
+      image: image || utils.PLACEHOLDER_SVG,
+      fallbackImage: utils.PLACEHOLDER_SVG,
+      score: null,
+      isFeatured: isFeatured,
+      scoreLabel: scoreLabel,
+      scoreTier: scoreTier,
       tags: tags,
-      priceInfo: Number.isFinite(salePrice)
-        ? {
-            salePrice: salePrice,
-            normalPrice: Number.isFinite(normalPrice) ? normalPrice : salePrice,
-            savings: savings
-          }
-        : null,
-      summary: summaryParts.join(" "),
-      url: "https://www.cheapshark.com/redirect?dealID=" + encodeURIComponent(deal.dealID),
-      sourceLabel: "Steam Fırsatına Git"
+      priceInfo: {
+        salePrice: lowestPrice,
+        normalPrice:
+          discount > 0 && discount < 99
+            ? Number((lowestPrice / (1 - discount / 100)).toFixed(2))
+            : lowestPrice,
+        savings: discount
+      },
+      summary: cleanedDesc || fallbackDesc,
+      url: detailUrl,
+      sourceLabel: "NEXARDA'da Gör"
     };
   }
 
@@ -158,32 +210,23 @@
     };
   }
 
-  function normalizeAnime(anime) {
-    if (!anime || !anime.mal_id) return null;
+  function normalizeAniListAnime(anime) {
+    if (!anime || !anime.id) return null;
 
-    const title = String(anime.title || anime.title_english || "İsimsiz Anime").trim();
-    const score =
-      typeof anime.score === "number" && Number.isFinite(anime.score)
-        ? Number(anime.score.toFixed(2))
+    const titleObj = anime.title || {};
+    const title = String(titleObj.english || titleObj.romaji || "İsimsiz Anime").trim();
+
+    const avg100 =
+      typeof anime.averageScore === "number" && Number.isFinite(anime.averageScore)
+        ? anime.averageScore
         : null;
+    const score = avg100 !== null ? Number((avg100 / 10).toFixed(1)) : null;
 
-    const webpLarge = utils.ensureHttps(
-      anime.images && anime.images.webp && anime.images.webp.large_image_url
-    );
-    const jpgLarge = utils.ensureHttps(
-      anime.images && anime.images.jpg && anime.images.jpg.large_image_url
-    );
-    const jpgSmall = utils.ensureHttps(
-      anime.images && anime.images.jpg && anime.images.jpg.image_url
-    );
+    const extraLarge = utils.ensureHttps(anime.coverImage && anime.coverImage.extraLarge);
+    const large = utils.ensureHttps(anime.coverImage && anime.coverImage.large);
 
     const genres = Array.isArray(anime.genres)
-      ? anime.genres
-          .slice(0, 3)
-          .map(function (g) {
-            return utils.translateGenre(g && g.name);
-          })
-          .filter(Boolean)
+      ? anime.genres.slice(0, 3).map(utils.translateGenre).filter(Boolean)
       : [];
 
     const tags = genres.map(function (g) {
@@ -193,45 +236,52 @@
     if (typeof anime.episodes === "number" && anime.episodes > 0) {
       tags.push({ type: "tag", label: anime.episodes + " Bölüm" });
     } else {
-      tags.push({ type: "tag", label: "Bölüm Belirsiz" });
+      tags.push({ type: "tag", label: "Devam Ediyor" });
     }
 
-    if (anime.year) {
-      tags.push({ type: "tag", label: String(anime.year) });
+    if (anime.seasonYear) {
+      tags.push({ type: "tag", label: String(anime.seasonYear) });
     }
 
-    const rawSynopsis = typeof anime.synopsis === "string"
-      ? anime.synopsis.replace(/\[Written by MAL Rewrite\]/gi, "").trim()
-      : "";
+    const cleanedDesc = utils
+      .stripHtml(anime.description || "")
+      .replace(/\(Source:[^)]+\)\s*$/i, "")
+      .trim();
+
+    const externalUrl = anime.idMal
+      ? "https://myanimelist.net/anime/" + encodeURIComponent(anime.idMal)
+      : utils.sanitizeExternalUrl(anime.siteUrl);
 
     return {
-      uid: "anime:" + anime.mal_id,
+      uid: "anime:" + anime.id,
       category: "anime",
       title: title,
-      image: webpLarge || jpgLarge || jpgSmall || utils.PLACEHOLDER_SVG,
-      fallbackImage: jpgSmall || utils.PLACEHOLDER_SVG,
+      image: extraLarge || large || utils.PLACEHOLDER_SVG,
+      fallbackImage: large || utils.PLACEHOLDER_SVG,
       score: score,
-      scoreLabel: score !== null ? "MAL " + score.toFixed(1) : "Puan Yok",
+      scoreLabel: score !== null ? score.toFixed(1) + " / 10" : "Puan Yok",
       scoreTier: score === null ? "na" : score >= 8.0 ? "high" : "mid",
       tags: tags,
       priceInfo: null,
-      summary: rawSynopsis || "Bu anime için henüz özet bilgisi eklenmemiş.",
-      url: utils.sanitizeExternalUrl(anime.url),
-      sourceLabel: "MyAnimeList'te Gör"
+      summary: cleanedDesc || "Bu anime için henüz özet bilgisi eklenmemiş.",
+      url: externalUrl,
+      sourceLabel: anime.idMal ? "MyAnimeList'te Gör" : "AniList'te Gör"
     };
   }
 
-  async function fetchJsonWithTimeout(url, timeoutMs) {
+  async function fetchJsonWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(function () {
       controller.abort();
-    }, timeoutMs || 12000);
+    }, timeoutMs || 15000);
 
     try {
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: { Accept: "application/json" }
-      });
+      const fetchOpts = Object.assign(
+        { headers: { Accept: "application/json" } },
+        options || {},
+        { signal: controller.signal }
+      );
+      const response = await fetch(url, fetchOpts);
 
       if (response.status === 429) {
         throw new Error("API istek sınırına ulaşıldı. Birkaç saniye bekleyip tekrar deneyin.");
@@ -254,30 +304,42 @@
   }
 
   async function fetchCategoryItems(category) {
-    const endpoint = ENDPOINTS[category];
-    if (!endpoint) {
-      throw new Error("Geçersiz kategori seçimi.");
-    }
-
-    const payload = await fetchJsonWithTimeout(endpoint, 15000);
-
     if (category === "game") {
-      if (!Array.isArray(payload)) {
-        throw new Error("Oyun verileri beklenen formatta alınamadı.");
-      }
-      const seenTitles = new Set();
+      const settled = await Promise.allSettled(
+        ENDPOINTS.gamePages.map(function (url) {
+          return fetchJsonWithTimeout(url, null, 15000);
+        })
+      );
+
+      const seenIds = new Set();
       const normalized = [];
-      for (let i = 0; i < payload.length; i += 1) {
-        const item = normalizeGame(payload[i]);
-        if (item && !seenTitles.has(item.title.toLowerCase())) {
-          seenTitles.add(item.title.toLowerCase());
-          normalized.push(item);
+      let lastError = null;
+
+      settled.forEach(function (res) {
+        if (res.status === "rejected") {
+          lastError = res.reason;
+          return;
         }
+        const items = res.value && res.value.results && res.value.results.items;
+        if (!Array.isArray(items)) return;
+
+        items.forEach(function (raw) {
+          const item = normalizeNexardaGame(raw);
+          if (item && !seenIds.has(item.uid)) {
+            seenIds.add(item.uid);
+            normalized.push(item);
+          }
+        });
+      });
+
+      if (normalized.length === 0) {
+        throw lastError || new Error("Oyun verileri alınamadı. Lütfen tekrar deneyin.");
       }
       return utils.shuffleArray(normalized);
     }
 
     if (category === "show") {
+      const payload = await fetchJsonWithTimeout(ENDPOINTS.show, null, 15000);
       if (!Array.isArray(payload)) {
         throw new Error("Dizi verileri beklenen formatta alınamadı.");
       }
@@ -286,22 +348,42 @@
     }
 
     if (category === "anime") {
-      const list = payload && Array.isArray(payload.data) ? payload.data : null;
+      const payload = await fetchJsonWithTimeout(
+        ENDPOINTS.anime,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json"
+          },
+          body: JSON.stringify({ query: ANILIST_QUERY })
+        },
+        15000
+      );
+
+      const list =
+        payload &&
+        payload.data &&
+        payload.data.Page &&
+        Array.isArray(payload.data.Page.media)
+          ? payload.data.Page.media
+          : null;
+
       if (!list) {
         throw new Error("Anime verileri beklenen formatta alınamadı.");
       }
-      const normalized = list.map(normalizeAnime).filter(Boolean);
+      const normalized = list.map(normalizeAniListAnime).filter(Boolean);
       return utils.shuffleArray(normalized);
     }
 
-    return [];
+    throw new Error("Geçersiz kategori seçimi.");
   }
 
   const exported = {
     ENDPOINTS: ENDPOINTS,
-    normalizeGame: normalizeGame,
+    normalizeNexardaGame: normalizeNexardaGame,
     normalizeShow: normalizeShow,
-    normalizeAnime: normalizeAnime,
+    normalizeAniListAnime: normalizeAniListAnime,
     fetchCategoryItems: fetchCategoryItems
   };
 
